@@ -1,4 +1,6 @@
 #include <raylib.h>
+#include <math.h>
+
 #include "abg_core.h"
 #include "abg_ui.h"
 
@@ -7,6 +9,10 @@
 
 #define SLIDER_TOTAL 100
 #define SLIDER_COUNT 3
+#define SLIDER_MIN 0.05f
+#define SLIDER_MAX ((float)SLIDER_TOTAL - (SLIDER_MIN * (SLIDER_COUNT - 1)))
+#define SLIDER_VISUAL_ZERO 0.5f
+#define SLIDER_REVIVE_SHARE 0.75f
 
 typedef struct {
     Vector2 pos;
@@ -18,29 +24,104 @@ typedef struct {
 } Slider;
 
 void Slider_SetVProportion(Slider sliders[], int draggedSlider, float newDraggedValue) {
-    float oldOtherTotal = 0.0f;
-    int zeroOtherCount = 0;
+    float oldDraggedValue = sliders[draggedSlider].v;
 
-    for (int i = 0; i < SLIDER_COUNT; i++) {
-        if (i != draggedSlider) {
-            oldOtherTotal += sliders[i].v;
+    newDraggedValue = ABG_ClampFloat(newDraggedValue, SLIDER_MIN, SLIDER_MAX);
 
-            if (sliders[i].v <= ABG_EPSILON) {
-                zeroOtherCount++;
-            }
-        }
+    float delta = newDraggedValue - oldDraggedValue;
+
+    if (delta > -ABG_EPSILON && delta < ABG_EPSILON) {
+        return;
     }
 
-    float newOtherTotal = (float)SLIDER_TOTAL - newDraggedValue;
-    float otherDelta = newOtherTotal - oldOtherTotal;
+    int zeroOtherCount = 0;
+    float nonZeroOtherTotal = 0.0f;
+
+    for (int i = 0; i < SLIDER_COUNT; i++) {
+        if (i == draggedSlider) {
+            continue;
+        }
+
+        if (sliders[i].v < SLIDER_VISUAL_ZERO) {
+            zeroOtherCount++;
+        } else {
+            nonZeroOtherTotal += sliders[i].v;
+        }
+    }
 
     sliders[draggedSlider].v = newDraggedValue;
 
     /*
-        Edge case 1:
-        If all other sliders were 0, there is no ratio to preserve.
-        Split the remaining value evenly.
+        Special behavior:
+        If another slider is visually zero, aggressively revive it.
     */
+    if (zeroOtherCount > 0 && nonZeroOtherTotal > ABG_EPSILON) {
+        float reviveAmount = fabsf(delta) * SLIDER_REVIVE_SHARE;
+        float reviveEach = reviveAmount / (float)zeroOtherCount;
+
+        if (delta > 0.0f) {
+            /*
+                Dragged slider increased.
+
+                The other sliders must lose `delta` total.
+                But we also want the zero slider to gain `reviveAmount`.
+
+                So the non-zero other sliders must lose:
+                    delta + reviveAmount
+            */
+            float amountToTakeFromNonZero = delta + reviveAmount;
+
+            for (int i = 0; i < SLIDER_COUNT; i++) {
+                if (i == draggedSlider) {
+                    continue;
+                }
+
+                if (sliders[i].v < SLIDER_VISUAL_ZERO) {
+                    sliders[i].v += reviveEach;
+                } else {
+                    float ratio = sliders[i].v / nonZeroOtherTotal;
+                    sliders[i].v -= amountToTakeFromNonZero * ratio;
+                }
+            }
+        } else {
+            /*
+                Dragged slider decreased.
+
+                The other sliders gained freed value.
+                Give most of that freed value to the zero slider.
+            */
+            float freedValue = -delta;
+            float remainingGain = freedValue - reviveAmount;
+
+            for (int i = 0; i < SLIDER_COUNT; i++) {
+                if (i == draggedSlider) {
+                    continue;
+                }
+
+                if (sliders[i].v < SLIDER_VISUAL_ZERO) {
+                    sliders[i].v += reviveEach;
+                } else {
+                    float ratio = sliders[i].v / nonZeroOtherTotal;
+                    sliders[i].v += remainingGain * ratio;
+                }
+            }
+        }
+
+        return;
+    }
+
+    /*
+        Normal proportional behavior.
+    */
+    float oldOtherTotal = 0.0f;
+    float newOtherTotal = (float)SLIDER_TOTAL - newDraggedValue;
+
+    for (int i = 0; i < SLIDER_COUNT; i++) {
+        if (i != draggedSlider) {
+            oldOtherTotal += sliders[i].v;
+        }
+    }
+
     if (oldOtherTotal <= ABG_EPSILON) {
         float splitValue = newOtherTotal / (float)(SLIDER_COUNT - 1);
 
@@ -53,32 +134,6 @@ void Slider_SetVProportion(Slider sliders[], int draggedSlider, float newDragged
         return;
     }
 
-    /*
-        Edge case 2:
-        If the dragged slider moved down, the other sliders gained value.
-
-        If any non-dragged sliders are currently 0, give the newly freed value
-        to those zero sliders instead of letting the non-zero slider absorb
-        everything proportionally.
-    */
-    if (otherDelta > ABG_EPSILON && zeroOtherCount > 0) {
-        float valueForEachZero = otherDelta / (float)zeroOtherCount;
-
-        for (int i = 0; i < SLIDER_COUNT; i++) {
-            if (i != draggedSlider && sliders[i].v <= ABG_EPSILON) {
-                sliders[i].v = valueForEachZero;
-            }
-        }
-
-        return;
-    }
-
-    /*
-        Normal proportional behavior.
-        This handles:
-        - no zero sliders
-        - dragged slider moving up, meaning the others must shrink
-    */
     for (int i = 0; i < SLIDER_COUNT; i++) {
         if (i != draggedSlider) {
             float oldRatio = sliders[i].v / oldOtherTotal;
@@ -160,8 +215,8 @@ int main(void) {
                 mousePos.y,
                 sliderBottom,
                 sliderTop,
-                0.0f,
-                (float)SLIDER_TOTAL
+                SLIDER_MIN,
+                SLIDER_MAX
             );
 
             Slider_SetVProportion(sliders, draggedSlider, newValue);
@@ -216,6 +271,8 @@ int main(void) {
                     "Click/Drag slider to change values",
                     20, 50, 20, BLACK
                 );
+
+                TextFormat("%s: %.2f%%", sliders[i].label, sliders[i].v);
             }
 
         EndDrawing();
